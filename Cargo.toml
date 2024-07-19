@@ -1,7 +1,12 @@
 [package]
-name = "sig-verifier"
+name = "sig_verifier_native"
 version = "0.1.0"
 edition = "2021"
+
+[lib]
+name = "sig_verifier_native"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
 
 [dependencies]
 alloy-json-rpc = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }
@@ -10,11 +15,15 @@ alloy-provider = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7
 alloy-rpc-types = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }
 alloy-sol-types = { version = "0.7.0" }
 alloy-transport = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }
+k256 = "0.13"
+log = "0.4"
+thiserror = "1.0.63"
 
 [dev-dependencies]
 alloy-node-bindings = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }
 k256 = "0.13"
 rand = "0.8"
+env_logger = "0.10"
 regex = "1"
 tokio = { version = "1", features = ["test-util", "macros", "process"] }
 

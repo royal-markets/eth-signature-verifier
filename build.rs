@@ -89,6 +89,8 @@ fn extract_bytecodes() {
 }
 
 fn extract_bytecode(input_file: &str, output_file: &str) {
+    println!("input_file: {}", input_file);
+    println!("output_file: {}", output_file);
     let contents = serde_json::from_slice::<Value>(&std::fs::read(input_file).unwrap()).unwrap();
     let bytecode = contents
         .get("bytecode")
