@@ -325,14 +325,15 @@ mod test_helpers;
 mod test {
     use {
         super::*,
-        alloy_primitives::{address, b256, bytes, Uint, U256},
+        alloy_primitives::{address, b256, bytes, hex, Uint, B256, U256},
         alloy_provider::{network::Ethereum, ReqwestProvider},
-        alloy_sol_types::{SolCall, SolValue},
+        alloy_sol_types::{Eip712Domain, SolCall, SolValue},
         k256::ecdsa::SigningKey,
         serial_test::serial,
         test_helpers::{
             deploy_contract, sign_message, spawn_anvil, CREATE2_CONTRACT, ERC1271_MOCK_CONTRACT,
         },
+        zerocopy::AsBytes,
     };
 
     // Manual test. Paste address, signature, message, and project ID to verify
@@ -496,6 +497,77 @@ mod test {
             .await
             .unwrap()
             .is_valid());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn eip712_pass() {
+        let (_anvil, _rpc_url, provider, private_key) = spawn_anvil();
+
+        // Define EIP-712 domain
+        let domain = Eip712Domain {
+            name: Some(std::borrow::Cow::Borrowed("MyDApp")),
+            version: Some(std::borrow::Cow::Borrowed("1")),
+            chain_id: Some(U256::from(1)),
+            verifying_contract: Some(Address::default()),
+            salt: None,
+        };
+
+        // Compute domain separator
+        let domain_separator = domain.separator();
+        println!("Domain separator: {:?}", hex::encode(domain_separator));
+
+        // Define the struct hash (in a real scenario, this would be the hash of your struct)
+        let struct_hash = keccak256("ExampleStruct(uint256 value)");
+        println!("Struct hash: {:?}", hex::encode(struct_hash));
+
+        // Compute the EIP-712 hash
+        let message_hash = {
+            let mut message = Vec::with_capacity(66); // 2 + 32 + 32
+            message.extend_from_slice(&[0x19, 0x01]);
+            message.extend_from_slice(domain_separator.as_ref());
+            message.extend_from_slice(struct_hash.as_ref());
+            keccak256(message)
+        };
+        println!("EIP-712 message hash: {:?}", hex::encode(message_hash));
+
+        // Sign the message hash
+        let signing_key = SigningKey::from_bytes(&private_key.to_bytes()).unwrap();
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(message_hash.as_ref())
+            .unwrap();
+        let mut sig_bytes = signature.to_bytes().to_vec();
+        sig_bytes.push(recovery_id.to_byte() + 27);
+        println!("Signature: {:?}", hex::encode(&sig_bytes));
+
+        // Get the signer's address
+        let signer = Address::from_private_key(&private_key);
+        println!("Signer address: {:?}", signer);
+
+        // Verify the signature using the contract
+        let result = verify_signature(
+            sig_bytes.clone(),
+            signer,
+            Bytes::from(message_hash.to_vec()),
+            provider.clone(),
+        )
+        .await
+        .unwrap();
+
+        println!("Contract verification result: {:?}", result);
+        assert!(result.is_valid(), "EIP-712 signature should be valid");
+
+        // Extract address
+        let extracted_address =
+            extract_address(sig_bytes, Bytes::from(message_hash.to_vec()), provider)
+                .await
+                .unwrap();
+
+        println!("Extracted address: {:?}", extracted_address);
+        assert_eq!(
+            extracted_address, signer,
+            "Extracted address should match the signer"
+        );
     }
 
     #[tokio::test]
