@@ -1,6 +1,6 @@
 use {
     alloy_node_bindings::{Anvil, AnvilInstance},
-    alloy_primitives::{eip191_hash_message, hex, Address},
+    alloy_primitives::{eip191_hash_message, hex, Address, Bytes},
     alloy_provider::{network::Ethereum, ReqwestProvider},
     k256::ecdsa::SigningKey,
     regex::Regex,
@@ -83,6 +83,16 @@ pub async fn deploy_contract(
 
 pub fn sign_message(message: &str, private_key: &SigningKey) -> Vec<u8> {
     let hash = eip191_hash_message(message.as_bytes());
+    let (signature, recovery): (k256::ecdsa::Signature, _) = private_key
+        .sign_prehash_recoverable(hash.as_slice())
+        .unwrap();
+    let signature = signature.to_bytes();
+    // need for +27 is mentioned in ERC-1271 reference implementation
+    [&signature[..], &[recovery.to_byte() + 27]].concat()
+}
+
+pub fn sign_message_bytes(message: &Bytes, private_key: &SigningKey) -> Vec<u8> {
+    let hash = eip191_hash_message(message.as_ref());
     let (signature, recovery): (k256::ecdsa::Signature, _) = private_key
         .sign_prehash_recoverable(hash.as_slice())
         .unwrap();

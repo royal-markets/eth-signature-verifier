@@ -6,6 +6,7 @@ use {
     alloy_transport::{Transport, TransportErrorKind},
     k256::ecdsa::{RecoveryId, Signature, VerifyingKey},
     log::error,
+    zerocopy::AsBytes,
 };
 
 /// The expected result for a successful signature verification.
@@ -193,7 +194,7 @@ where
 /// # Arguments
 ///
 /// * `signature` - The signature to verify.
-/// * `message` - The original message that was signed.
+/// * `message` - The original message that was signed in bytes.
 /// * `provider` - The provider used for making RPC calls.
 ///
 /// # Returns
@@ -206,14 +207,14 @@ pub async fn verify_signature_auto<S, M, P, T>(
 ) -> Result<Verification, RpcError>
 where
     S: Into<Bytes> + Clone,
-    M: AsRef<[u8]> + Clone,
+    M: Into<Bytes> + AsRef<[u8]> + Clone,
     P: Provider<T>,
     T: Transport + Clone,
 {
-    let address = extract_address(signature.clone(), message.clone(), &provider)
+    let address = extract_address(signature.clone(), message.as_ref(), &provider)
         .await
         .unwrap();
-    verify_signature(signature, address, message, provider).await
+    verify_signature(signature, address, message.into(), provider).await
 }
 
 /// Recovers the signer's address from an ECDSA signature.
@@ -252,39 +253,44 @@ fn ecrecover(hash: B256, v: u8, r: U256, s: U256) -> Result<Address, SignatureEr
 
 /// Verifies a signature using ERC-6492.
 ///
+/// This function can verify all types of signatures, including EOA, EIP-1271, and EIP-712.
+///
 /// # Arguments
 ///
 /// * `signature` - The signature to verify.
-/// * `address` - The address to verify against.
-/// * `message` - The original message that was signed.
+/// * `signer` - The address of the signer to verify against.
+/// * `message` - The original message that was signed (as raw bytes).
 /// * `provider` - The provider used for making RPC calls.
 ///
 /// # Returns
 ///
-/// A `Verification` enum indicating whether the signature is valid or invalid.
+/// A `Result` containing a `Verification` enum indicating whether the signature is valid or invalid.
 /// If an error occurs while making the RPC call, it will return `Err(RpcError)`.
-pub async fn verify_signature<S, M, P, T>(
+pub async fn verify_signature<S, P, T>(
     signature: S,
-    address: Address,
-    message: M,
+    signer: Address,
+    message: Bytes,
     provider: P,
 ) -> Result<Verification, RpcError>
 where
     S: Into<Bytes>,
-    M: AsRef<[u8]>,
     P: Provider<T>,
     T: Transport + Clone,
 {
+    let message_hash = B256::from_slice(keccak256(message).as_ref());
+
     let call = ValidateSigOffchain::constructorCall {
-        _signer: address,
-        _hash: eip191_hash_message(message),
+        _signer: signer,
+        _hash: message_hash,
         _signature: signature.into(),
     };
+
     let bytes = VALIDATE_SIG_OFFCHAIN_BYTECODE
         .iter()
         .cloned()
         .chain(call.abi_encode())
         .collect::<Vec<u8>>();
+
     let transaction_request =
         TransactionRequest::default().input(TransactionInput::new(bytes.into()));
 
@@ -318,6 +324,76 @@ where
     }
 }
 
+/// Creates an EIP-712 hash from a domain separator and a struct hash.
+///
+/// This function implements the EIP-712 encoding scheme, combining the domain separator
+/// and struct hash to create a unique message hash.
+///
+/// # Arguments
+///
+/// * `domain_separator` - The EIP-712 domain separator.
+/// * `struct_hash` - The hash of the struct being signed.
+///
+/// # Returns
+///
+/// A `B256` containing the EIP-712 message hash.
+pub fn create_eip712_hash(domain_separator: B256, struct_hash: B256) -> B256 {
+    keccak256(
+        &[
+            &[0x19, 0x01],
+            domain_separator.as_bytes(),
+            struct_hash.as_bytes(),
+        ]
+        .concat(),
+    )
+}
+
+/// Verifies an EIP-712 signature.
+///
+/// This function is a wrapper around `verify_signature` that automatically includes
+/// the domain separator for EIP-712 signatures.
+///
+/// # Arguments
+///
+/// * `signature` - The signature to verify.
+/// * `address` - The address to verify against.
+/// * `struct_hash` - The hash of the struct being signed.
+/// * `domain_separator` - The EIP-712 domain separator.
+/// * `provider` - The provider used for making RPC calls.
+///
+/// # Returns
+///
+/// A `Verification` enum indicating whether the signature is valid or invalid.
+/// If an error occurs while making the RPC call, it will return `Err(RpcError)`.
+pub async fn verify_eip712_signature<S>(
+    signature: S,
+    address: Address,
+    struct_hash: B256,
+    domain_separator: B256,
+) -> Result<Verification, SignatureError>
+where
+    S: AsRef<[u8]>,
+{
+    let signature = signature.as_ref();
+    if signature.len() != 65 {
+        return Err(SignatureError::InvalidSignature);
+    }
+
+    let message_hash = create_eip712_hash(domain_separator, struct_hash);
+
+    let r = U256::from_be_bytes::<32>(signature[0..32].try_into().unwrap());
+    let s = U256::from_be_bytes::<32>(signature[32..64].try_into().unwrap());
+    let v = signature[64];
+
+    let recovered = ecrecover(message_hash, v, r, s)?;
+
+    if recovered == address {
+        Ok(Verification::Valid)
+    } else {
+        Ok(Verification::Invalid)
+    }
+}
+
 #[cfg(test)]
 mod test_helpers;
 
@@ -325,15 +401,31 @@ mod test_helpers;
 mod test {
     use {
         super::*,
-        alloy_primitives::{address, b256, bytes, Uint, U256},
+        alloy_primitives::{address, b256, bytes, hex, Uint, U256},
         alloy_provider::{network::Ethereum, ReqwestProvider},
         alloy_sol_types::{SolCall, SolValue},
         k256::ecdsa::SigningKey,
         serial_test::serial,
         test_helpers::{
-            deploy_contract, sign_message, spawn_anvil, CREATE2_CONTRACT, ERC1271_MOCK_CONTRACT,
+            deploy_contract, sign_message, sign_message_bytes, spawn_anvil, CREATE2_CONTRACT,
+            ERC1271_MOCK_CONTRACT,
         },
     };
+
+    // Helper function to create a sample EIP-712 signature
+    fn create_sample_eip712_signature(
+        private_key: &SigningKey,
+        domain_separator: B256,
+        struct_hash: B256,
+    ) -> Vec<u8> {
+        let message_hash = create_eip712_hash(domain_separator, struct_hash);
+        let (signature, recovery_id) = private_key
+            .sign_prehash_recoverable(message_hash.as_ref())
+            .unwrap();
+        let mut sig_bytes = signature.to_bytes().to_vec();
+        sig_bytes.push(recovery_id.to_byte() + 27); // EIP-155 adjustments
+        sig_bytes
+    }
 
     // Manual test. Paste address, signature, message, and project ID to verify
     // function
@@ -341,7 +433,7 @@ mod test {
     #[ignore]
     async fn manual() {
         let address = address!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-        let message = "xxx";
+        let message: Bytes = Bytes::from(b"aaaa");
         let signature = bytes!("aaaa");
 
         let provider = ReqwestProvider::<Ethereum>::new_http(
@@ -366,6 +458,29 @@ mod test {
             .await
             .unwrap();
         assert_eq!(extracted_address, expected_address);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_extract_address_from_eip712_signature() {
+        let (_anvil, _rpc_url, provider, private_key) = spawn_anvil();
+
+        let signer = Address::from_private_key(&private_key);
+        let domain_separator =
+            b256!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let struct_hash = b256!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+
+        let signature = create_sample_eip712_signature(&private_key, domain_separator, struct_hash);
+
+        let extracted_address =
+            extract_address(signature.clone(), struct_hash.as_bytes(), provider)
+                .await
+                .unwrap();
+
+        assert_eq!(
+            extracted_address, signer,
+            "Extracted address should match the signer"
+        );
     }
 
     #[tokio::test]
@@ -473,8 +588,8 @@ mod test {
         let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil();
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
         let address = Address::from_private_key(&private_key);
         assert!(verify_signature(signature, address, message, provider)
             .await
@@ -488,8 +603,9 @@ mod test {
         let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil();
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
-        let message = "xxx";
-        let mut signature = sign_message(message, &private_key);
+        let message = Bytes::from(b"xxx".to_vec());
+
+        let mut signature = sign_message_bytes(&message, &private_key);
         *signature.first_mut().unwrap() = signature.first().unwrap().wrapping_add(1);
         let address = Address::from_private_key(&private_key);
         assert!(!verify_signature(signature, address, message, provider)
@@ -504,8 +620,8 @@ mod test {
         let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil();
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
         let mut address = Address::from_private_key(&private_key);
         *address.0.first_mut().unwrap() = address.0.first().unwrap().wrapping_add(1);
         assert!(!verify_signature(signature, address, message, provider)
@@ -520,10 +636,12 @@ mod test {
         let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil();
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message = Bytes::from(b"xxx".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
         let address = Address::from_private_key(&private_key);
-        let message2 = "yyy";
+        let message2 = Bytes::from(b"yyy".to_vec());
+
         assert!(!verify_signature(signature, address, message2, provider)
             .await
             .unwrap()
@@ -542,8 +660,8 @@ mod test {
         )
         .await;
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
         assert!(
             verify_signature(signature, contract_address, message, provider)
@@ -565,8 +683,8 @@ mod test {
         )
         .await;
 
-        let message = "xxx";
-        let mut signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let mut signature = sign_message_bytes(&message, &private_key);
         *signature.first_mut().unwrap() = signature.first().unwrap().wrapping_add(1);
 
         assert!(
@@ -589,9 +707,9 @@ mod test {
         )
         .await;
 
-        let message = "xxx";
-        let signature = sign_message(
-            message,
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(
+            &message,
             &SigningKey::from_bytes(&anvil.keys().get(1).unwrap().to_bytes()).unwrap(),
         );
 
@@ -618,8 +736,9 @@ mod test {
         *contract_address.0.first_mut().unwrap() =
             contract_address.0.first().unwrap().wrapping_add(1);
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
 
         assert!(
             !verify_signature(signature, contract_address, message, provider)
@@ -641,10 +760,11 @@ mod test {
         )
         .await;
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
-        let message2 = "yyy";
+        let message2: Bytes = Bytes::from(b"yyy".to_vec());
+
         assert!(
             !verify_signature(signature, contract_address, message2, provider)
                 .await
@@ -715,13 +835,94 @@ mod test {
 
     #[tokio::test]
     #[serial]
+    async fn eip712_pass() {
+        // Setup Anvil instance and provider
+        let (_anvil, _rpc_url, provider, private_key) = spawn_anvil();
+
+        // Define the domain separator and struct hash
+        let domain_separator =
+            b256!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let struct_hash = b256!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+
+        // Create a sample EIP-712 signature
+        let signature = create_sample_eip712_signature(&private_key, domain_separator, struct_hash);
+
+        // Define the signer address (public key derived from the private key)
+        let signer_address = Address::from_private_key(&private_key);
+
+        // Verify the EIP-712 signature
+        let result = verify_eip712_signature(
+            signature.clone(),
+            signer_address,
+            struct_hash,
+            domain_separator,
+        )
+        .await;
+
+        // Check if the verification was successful
+        match result {
+            Ok(verification) => {
+                println!("Verification result: {:?}", verification);
+                assert!(
+                    verification.is_valid(),
+                    "The EIP-712 signature should be valid"
+                );
+            }
+            Err(e) => {
+                println!("Error verifying EIP-712 signature: {:?}", e);
+                panic!("Failed to verify EIP-712 signature");
+            }
+        }
+
+        // Extract the address from the EIP-712 signature
+        let extracted_address = extract_address(signature, struct_hash.as_bytes(), provider)
+            .await
+            .unwrap();
+        assert_eq!(
+            extracted_address, signer_address,
+            "Extracted address should match the signer address"
+        );
+        // let (_anvil, _rpc_url, _provider, private_key) = spawn_anvil();
+
+        // let signer = Address::from_private_key(&private_key);
+        // println!("Signer address: {:?}", signer);
+
+        // let domain_separator =
+        //     b256!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        // println!("Domain separator: {:?}", domain_separator);
+
+        // let struct_hash = b256!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        // println!("Struct hash: {:?}", struct_hash);
+
+        // let message_hash = create_eip712_hash(domain_separator, struct_hash);
+        // println!("EIP-712 message hash: {:?}", message_hash);
+
+        // let (signature, recovery_id) = private_key
+        //     .sign_prehash_recoverable(message_hash.as_ref())
+        //     .unwrap();
+        // let mut sig_bytes = signature.to_bytes().to_vec();
+        // sig_bytes.push(recovery_id.to_byte() + 27);
+        // println!("Signature: {:?}", hex::encode(&sig_bytes));
+
+        // let result = verify_eip712_signature(sig_bytes, signer, struct_hash, domain_separator)
+        //     .await
+        //     .unwrap();
+
+        // println!("Verification result: {:?}", result);
+
+        // assert!(result.is_valid());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn erc6492_pass() {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
         let (predeploy_address, signature) = predeploy_signature(
             Address::from_private_key(&private_key),
             create2_factory_address,
@@ -743,8 +944,8 @@ mod test {
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
-        let message = "xxx";
-        let mut signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let mut signature = sign_message_bytes(&message, &private_key);
         *signature.first_mut().unwrap() = signature.first().unwrap().wrapping_add(1);
         let (predeploy_address, signature) = predeploy_signature(
             Address::from_private_key(&private_key),
@@ -767,9 +968,9 @@ mod test {
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
-        let message = "xxx";
-        let signature = sign_message(
-            message,
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+        let signature = sign_message_bytes(
+            &message,
             &SigningKey::from_bytes(&anvil.keys().get(1).unwrap().to_bytes()).unwrap(),
         );
         let (predeploy_address, signature) = predeploy_signature(
@@ -793,8 +994,9 @@ mod test {
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
         let (mut predeploy_address, signature) = predeploy_signature(
             Address::from_private_key(&private_key),
             create2_factory_address,
@@ -819,15 +1021,16 @@ mod test {
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
-        let message = "xxx";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"xxx".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
         let (predeploy_address, signature) = predeploy_signature(
             Address::from_private_key(&private_key),
             create2_factory_address,
             signature,
         );
 
-        let message2 = "yyy";
+        let message2: Bytes = Bytes::from(b"yyy".to_vec());
         assert!(
             !verify_signature(signature, predeploy_address, message2, provider)
                 .await
@@ -841,8 +1044,8 @@ mod test {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"test message".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
         let invalid_factory = address!("0000000000000000000000000000000000000001");
         let (_predeploy_address, mut erc6492_signature) = predeploy_signature(
@@ -864,8 +1067,9 @@ mod test {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"test message".to_vec());
+
+        let signature = sign_message_bytes(&message, &private_key);
 
         let (_predeploy_address, mut erc6492_signature) = predeploy_signature(
             Address::from_private_key(&private_key),
@@ -887,8 +1091,8 @@ mod test {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"test message".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
         let (_predeploy_address, mut erc6492_signature) = predeploy_signature(
             Address::from_private_key(&private_key),
@@ -912,8 +1116,8 @@ mod test {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"test message".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
         let (predeploy_address, mut erc6492_signature) = predeploy_signature(
             Address::from_private_key(&private_key),
@@ -938,8 +1142,8 @@ mod test {
         let (_anvil, rpc_url, provider, private_key) = spawn_anvil();
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let signature = sign_message(message, &private_key);
+        let message: Bytes = Bytes::from(b"test message".to_vec());
+        let signature = sign_message_bytes(&message, &private_key);
 
         let (predeploy_address, erc6492_signature) = predeploy_signature(
             Address::from_private_key(&private_key),
@@ -948,12 +1152,12 @@ mod test {
         );
 
         // First, deploy the contract
-        let _ = extract_address(erc6492_signature.clone(), message, provider.clone())
+        let _ = extract_address(erc6492_signature.clone(), message.clone(), provider.clone())
             .await
             .unwrap();
 
         // Now try to extract the address again
-        let result = extract_address(erc6492_signature, message, provider).await;
+        let result = extract_address(erc6492_signature, message.clone(), provider).await;
         assert_eq!(result.unwrap(), predeploy_address);
     }
     #[tokio::test]
@@ -971,10 +1175,10 @@ mod test {
             create2_factory_address
         );
 
-        let original_message = "test message";
+        let original_message: Bytes = Bytes::from(b"test message");
         println!("Original message: {}", original_message);
 
-        let signature = sign_message(original_message, &private_key);
+        let signature = sign_message_bytes(&original_message, &private_key);
         println!("Signature created: {:?}", signature);
 
         let signer_address = Address::from_private_key(&private_key);
@@ -990,7 +1194,7 @@ mod test {
         println!("Attempting to extract address with original message");
         let result1 = extract_address(
             erc6492_signature.clone(),
-            original_message,
+            original_message.clone(),
             provider.clone(),
         )
         .await;
@@ -1009,14 +1213,14 @@ mod test {
         );
 
         // Now try with a different message
-        let different_message = "different message";
+        let different_message = Bytes::from(b"different message".to_vec());
         println!(
             "Attempting to extract address with different message: {}",
             different_message
         );
         let result2 = extract_address(
             erc6492_signature.clone(),
-            different_message,
+            different_message.clone(),
             provider.clone(),
         )
         .await;
@@ -1040,7 +1244,7 @@ mod test {
         let verification1 = verify_signature(
             erc6492_signature.clone(),
             predeploy_address,
-            original_message,
+            original_message.clone(),
             provider.clone(),
         )
         .await;
@@ -1052,7 +1256,7 @@ mod test {
         let verification2 = verify_signature(
             erc6492_signature,
             predeploy_address,
-            different_message,
+            different_message.clone(),
             provider,
         )
         .await;

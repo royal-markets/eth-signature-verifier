@@ -16,6 +16,7 @@ k256 = "0.13"
 log = "0.4"
 thiserror = "1.0.63"
 byteorder = "1.4"
+zerocopy = "0.3"
 
 [dev-dependencies]
 alloy-node-bindings = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }
