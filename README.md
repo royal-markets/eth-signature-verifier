@@ -25,4 +25,11 @@ if verification.is_valid() {
 }
 ```
 
+This crate also allows for the extracting of an address from a signature, as shown below:
+
+```rust
+let signature = bytes!("asdfabsdf")
+let address = extract_address(signature) // works for EOA, ERC1271, ERC6942
+```
+
 See test cases in `src/lib.rs` for more examples.
