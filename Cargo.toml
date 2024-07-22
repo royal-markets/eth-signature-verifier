@@ -1,12 +1,9 @@
 [package]
-name = "sig_verifier_native"
+name = "sig_verifier"
 version = "0.1.0"
 edition = "2021"
-
-[lib]
-name = "sig_verifier_native"
-path = "src/lib.rs"
-crate-type = ["cdylib"]
+authors = ["danielw1534@gmail.com"]
+license = "MIT"
 
 [dependencies]
 alloy-json-rpc = { git = "https://github.com/alloy-rs/alloy.git", rev = "d68a6b7" }

@@ -2236,7 +2236,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sig_verifier_native"
+name = "sig_verifier"
 version = "0.1.0"
 dependencies = [
  "alloy-json-rpc",
