@@ -1,11 +1,12 @@
 use {
     alloy_node_bindings::{Anvil, AnvilInstance},
-    alloy_primitives::{eip191_hash_message, hex, Address, Bytes},
+    alloy_primitives::{eip191_hash_message, hex, keccak256, Address, Bytes, B256},
     alloy_provider::{network::Ethereum, ReqwestProvider},
     k256::ecdsa::SigningKey,
     regex::Regex,
     std::process::Stdio,
     tokio::process::Command,
+    zerocopy::AsBytes,
 };
 
 fn format_foundry_dir(path: &str) -> String {
@@ -91,12 +92,50 @@ pub fn sign_message(message: &str, private_key: &SigningKey) -> Vec<u8> {
     [&signature[..], &[recovery.to_byte() + 27]].concat()
 }
 
-pub fn sign_message_bytes(message: &Bytes, private_key: &SigningKey) -> Vec<u8> {
+pub fn sign_message_bytes_eip191(message: &Bytes, private_key: &SigningKey) -> Vec<u8> {
     let hash = eip191_hash_message(message.as_ref());
-    let (signature, recovery): (k256::ecdsa::Signature, _) = private_key
+    let (signature, recovery_id) = private_key
         .sign_prehash_recoverable(hash.as_slice())
         .unwrap();
-    let signature = signature.to_bytes();
-    // need for +27 is mentioned in ERC-1271 reference implementation
-    [&signature[..], &[recovery.to_byte() + 27]].concat()
+    let mut sig_bytes = signature.to_bytes().to_vec();
+    sig_bytes.push(recovery_id.to_byte() + 27);
+    sig_bytes
+}
+
+pub fn sign_message_bytes_eip712(
+    domain_separator: B256,
+    struct_hash: B256,
+    private_key: &SigningKey,
+) -> Vec<u8> {
+    let message_hash = create_eip712_hash(domain_separator, struct_hash);
+    let (signature, recovery_id) = private_key
+        .sign_prehash_recoverable(message_hash.as_slice())
+        .unwrap();
+    let mut sig_bytes = signature.to_bytes().to_vec();
+    sig_bytes.push(recovery_id.to_byte() + 27);
+    sig_bytes
+}
+
+/// Creates an EIP-712 hash from a domain separator and a struct hash.
+///
+/// This function implements the EIP-712 encoding scheme, combining the domain separator
+/// and struct hash to create a unique message hash.
+///
+/// # Arguments
+///
+/// * `domain_separator` - The EIP-712 domain separator.
+/// * `struct_hash` - The hash of the struct being signed.
+///
+/// # Returns
+///
+/// A `B256` containing the EIP-712 message hash.
+pub fn create_eip712_hash(domain_separator: B256, struct_hash: B256) -> B256 {
+    keccak256(
+        &[
+            &[0x19, 0x01],
+            domain_separator.as_bytes(),
+            struct_hash.as_bytes(),
+        ]
+        .concat(),
+    )
 }
