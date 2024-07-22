@@ -17,6 +17,11 @@ const ERC6492_DETECTION_SUFFIX: [u8; 32] = [
     0x64, 0x92, 0x64, 0x92, 0x64, 0x92, 0x64, 0x92, 0x64, 0x92, 0x64, 0x92, 0x64, 0x92, 0x64, 0x92,
 ];
 
+const VALIDATE_SIG_OFFCHAIN_BYTECODE: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/../../../../.foundry/forge/out/Erc6492.sol/ValidateSigOffchain.bytecode"
+));
+
 sol! {
   contract ValidateSigOffchain {
     constructor (address _signer, bytes32 _hash, bytes memory _signature);
@@ -34,14 +39,18 @@ sol! {
         function computeAddress(bytes32 salt, bytes32 bytecodeHash) external view returns (address) {}
     }
 }
-const VALIDATE_SIG_OFFCHAIN_BYTECODE: &[u8] = include_bytes!(concat!(
-    env!("OUT_DIR"),
-    "/../../../../.foundry/forge/out/Erc6492.sol/ValidateSigOffchain.bytecode"
-));
+
+sol! {
+    struct ERC6492Signature {
+        address create2_factory;
+        bytes factory_calldata;
+        bytes signature;
+    }
+}
 
 /// Represents the result of a signature verification.
-#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 pub enum Verification {
     Valid,
     Invalid,
@@ -66,25 +75,18 @@ pub enum SignatureError {
     #[error("Decode error")]
     DecodeError,
 }
+
 pub type RpcError = alloy_json_rpc::RpcError<TransportErrorKind>;
 
-sol! {
-    struct ERC6492Signature {
-        address create2_factory;
-        bytes factory_calldata;
-        bytes signature;
-    }
-}
-
-/// Parses an ERC-6492 signature into its components.
-///
-/// # Arguments
-///
-/// * `sig_data` - The ERC-6492 signature data to parse.
-///
-/// # Returns
-///
-/// A tuple containing the CREATE2 factory address, factory calldata, and the original signature.
+// Parses an ERC-6492 signature into its components.
+//
+// # Arguments
+//
+// * `sig_data` - The ERC-6492 signature data to parse.
+//
+// # Returns
+//
+// A tuple containing the CREATE2 factory address, factory calldata, and the original signature.
 fn parse_erc6492_signature(sig_data: &[u8]) -> Result<(Address, Vec<u8>, Vec<u8>), SignatureError> {
     if sig_data.len() < 96 {
         return Err(SignatureError::InvalidSignature);
@@ -116,7 +118,7 @@ fn parse_erc6492_signature(sig_data: &[u8]) -> Result<(Address, Vec<u8>, Vec<u8>
     Ok((create2_factory, factory_calldata, signature))
 }
 
-/// Converts a byte slice to a usize.
+// Converts a byte slice to a usize.
 fn bytes_to_usize(bytes: &[u8]) -> usize {
     let mut padded = [0u8; 32];
     padded[32 - bytes.len()..].copy_from_slice(bytes);
