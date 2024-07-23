@@ -220,7 +220,7 @@ where
     P: Provider<T>,
     T: Transport + Clone,
 {
-    let address = extract_address(signature.clone(), message.clone(), &provider)
+    let address = extract_address(signature.clone(), message, &provider)
         .await
         .unwrap();
     verify_signature(signature, address, message, provider).await
