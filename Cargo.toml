@@ -1,0 +1,37 @@
+[package]
+name = "eth-signature-verifier"
+version = "0.1.0"
+edition = "2021"
+authors = ["Royal Engineering"]
+license = "MIT"
+
+[dependencies]
+alloy = { version = "0.2", features = [
+	"contract",
+	"dyn-abi",
+	"eip712",
+	"k256",
+	"providers",
+	"rpc",
+	"json-rpc",
+	"rpc-types",
+	"transports",
+	"signers",
+	"signer-local",
+	"sol-types"
+]}
+log = "0.4"
+thiserror = "1.0.63"
+
+[dev-dependencies]
+alloy-node-bindings = "0.2"
+rand = "0.8"
+env_logger = "0.10"
+regex = "1"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["test-util", "macros", "process"] }
+
+[build-dependencies]
+alloy = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
