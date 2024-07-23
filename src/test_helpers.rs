@@ -1,8 +1,11 @@
 use {
     alloy_node_bindings::{Anvil, AnvilInstance},
-    alloy_primitives::{eip191_hash_message, hex, Address},
+    alloy_primitives::{eip191_hash_message, hex, Address, FixedBytes},
     alloy_provider::{network::Ethereum, ReqwestProvider},
-    k256::ecdsa::SigningKey,
+    k256::{
+        ecdsa::SigningKey,
+        sha2::{Digest, Sha256},
+    },
     regex::Regex,
     std::process::Stdio,
     tokio::process::Command,
@@ -81,7 +84,7 @@ pub async fn deploy_contract(
     contract_address.parse().unwrap()
 }
 
-pub fn sign_message(message: &str, private_key: &SigningKey) -> Vec<u8> {
+pub fn sign_message_eip191(message: &str, private_key: &SigningKey) -> Vec<u8> {
     let hash = eip191_hash_message(message.as_bytes());
     let (signature, recovery): (k256::ecdsa::Signature, _) = private_key
         .sign_prehash_recoverable(hash.as_slice())
@@ -89,4 +92,13 @@ pub fn sign_message(message: &str, private_key: &SigningKey) -> Vec<u8> {
     let signature = signature.to_bytes();
     // need for +27 is mentioned in ERC-1271 reference implementation
     [&signature[..], &[recovery.to_byte() + 27]].concat()
+}
+
+pub fn message_str_to_bytes(input: &str) -> FixedBytes<32> {
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    let result = hasher.finalize();
+    let mut fixed_bytes = [0u8; 32];
+    fixed_bytes.copy_from_slice(&result[..]);
+    FixedBytes::from(fixed_bytes)
 }

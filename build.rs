@@ -73,14 +73,14 @@ fn compile_contracts() {
     assert!(output.status.success());
 }
 
-const ERC6492_FILE: &str = "forge/out/Erc6492.sol/ValidateSigOffchain.json";
-const ERC6492_BYTECODE_FILE: &str = "forge/out/Erc6492.sol/ValidateSigOffchain.bytecode";
+const ERC6942_FILE: &str = "forge/out/Erc6942.sol/ValidateSigOffchain.json";
+const ERC6942_BYTECODE_FILE: &str = "forge/out/Erc6942.sol/ValidateSigOffchain.bytecode";
 const ERC1271_MOCK_FILE: &str = "forge/out/Erc1271Mock.sol/Erc1271Mock.json";
 const ERC1271_MOCK_BYTECODE_FILE: &str = "forge/out/Erc1271Mock.sol/Erc1271Mock.bytecode";
 fn extract_bytecodes() {
     extract_bytecode(
-        &format_foundry_dir(ERC6492_FILE),
-        &format_foundry_dir(ERC6492_BYTECODE_FILE),
+        &format_foundry_dir(ERC6942_FILE),
+        &format_foundry_dir(ERC6942_BYTECODE_FILE),
     );
     extract_bytecode(
         &format_foundry_dir(ERC1271_MOCK_FILE),

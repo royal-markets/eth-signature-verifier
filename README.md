@@ -1,10 +1,10 @@
-# Universal Etheruem signature verification with ERC-6492
+# Universal Etheruem signature verification with ERC-6942
 
 This crate verifies any Ethereum signature including:
 
 - EOAs
 - Smart contract wallets with [ERC-1271](https://eips.ethereum.org/EIPS/eip-1271)
-- Predeploy contract wallets with [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492)
+- Predeploy contract wallets with [ERC-6942](https://eips.ethereum.org/EIPS/eip-6942)
 
 ## Usage
 
