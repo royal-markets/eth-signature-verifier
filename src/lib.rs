@@ -521,7 +521,7 @@ mod test {
         let private_key = SigningKey::random(&mut rand::thread_rng());
         let message = "xxx";
         let eip191_message = alloy_primitives::eip191_hash_message(message);
-        let signature = sign_message_eip191(&message, &private_key);
+        let signature = sign_message_eip191(message, &private_key);
         let signature_bytes = Bytes::from(signature.to_vec());
         // let signature_2 = sign_message_digest(message_bytes, &mut private_key);
         let address = Address::from_private_key(&private_key);
@@ -671,7 +671,7 @@ mod test {
 
         let message = "xxx";
         let eip191_message = alloy_primitives::eip191_hash_message(message);
-        let signature = sign_message_eip191(&message, &private_key);
+        let signature = sign_message_eip191(message, &private_key);
         let signature_bytes = Bytes::from(signature.to_vec());
 
         assert!(
