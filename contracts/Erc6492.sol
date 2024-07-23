@@ -4,10 +4,10 @@ interface IERC1271Wallet {
 }
 
 error ERC1271Revert(bytes error);
-error ERC6942DeployFailed(bytes error);
+error ERC6492DeployFailed(bytes error);
 
 contract UniversalSigValidator {
-  bytes32 private constant ERC6942_DETECTION_SUFFIX = 0x6942694269426942694269426942694269426942694269426942694269426942;
+  bytes32 private constant ERC6492_DETECTION_SUFFIX = 0x6492649264926492649264926492649264926492649264926492649264926492;
   bytes4 private constant ERC1271_SUCCESS = 0x1626ba7e;
 
   function isValidSigImpl(
@@ -19,11 +19,11 @@ contract UniversalSigValidator {
   ) public returns (bool) {
     uint contractCodeLen = address(_signer).code.length;
     bytes memory sigToValidate;
-    // The order here is strictly defined in https://eips.ethereum.org/EIPS/eip-6942
-    // - ERC-6942 suffix check and verification first, while being permissive in case the contract is already deployed; if the contract is deployed we will check the sig against the deployed version, this allows 6942 signatures to still be validated while taking into account potential key rotation
+    // The order here is strictly defined in https://eips.ethereum.org/EIPS/eip-6492
+    // - ERC-6492 suffix check and verification first, while being permissive in case the contract is already deployed; if the contract is deployed we will check the sig against the deployed version, this allows 6492 signatures to still be validated while taking into account potential key rotation
     // - ERC-1271 verification if there's contract code
     // - finally, ecrecover
-    bool isCounterfactual = bytes32(_signature[_signature.length-32:_signature.length]) == ERC6942_DETECTION_SUFFIX;
+    bool isCounterfactual = bytes32(_signature[_signature.length-32:_signature.length]) == ERC6492_DETECTION_SUFFIX;
     if (isCounterfactual) {
       address create2Factory;
       bytes memory factoryCalldata;
@@ -31,7 +31,7 @@ contract UniversalSigValidator {
 
       if (contractCodeLen == 0 || tryPrepare) {
         (bool success, bytes memory err) = create2Factory.call(factoryCalldata);
-        if (!success) revert ERC6942DeployFailed(err);
+        if (!success) revert ERC6492DeployFailed(err);
       }
     } else {
       sigToValidate = _signature;

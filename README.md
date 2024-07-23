@@ -1,10 +1,10 @@
-# Universal Etheruem signature verification with ERC-6942
+# Universal Etheruem signature verification with ERC-6492
 
 This crate verifies any Ethereum signature including:
 
 - EOAs
 - Smart contract wallets with [ERC-1271](https://eips.ethereum.org/EIPS/eip-1271)
-- Predeploy contract wallets with [ERC-6942](https://eips.ethereum.org/EIPS/eip-6942)
+- Predeploy contract wallets with [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492)
 
 ## Usage
 
@@ -37,7 +37,7 @@ use sig_verifier::extract_address;
 #[tokio::main]
 async fn main() {
     let signature = bytes!("0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb658")
-    let address = extract_address(signature).await.unwrap(); // works for EOA, ERC1271, ERC6942
+    let address = extract_address(signature).await.unwrap(); // works for EOA, ERC1271, ERC6492
     dbg!(address);
 }
 ```
