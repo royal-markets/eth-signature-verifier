@@ -1,5 +1,6 @@
 [package]
 name = "eth-signature-verifier"
+description = "Universal Etheruem signature verification with ERC-6492"
 version = "0.1.0"
 edition = "2021"
 authors = ["Royal Engineering"]
