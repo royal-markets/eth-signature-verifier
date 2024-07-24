@@ -77,6 +77,7 @@ const ERC6492_FILE: &str = "forge/out/Erc6492.sol/ValidateSigOffchain.json";
 const ERC6492_BYTECODE_FILE: &str = "forge/out/Erc6492.sol/ValidateSigOffchain.bytecode";
 const ERC1271_MOCK_FILE: &str = "forge/out/Erc1271Mock.sol/Erc1271Mock.json";
 const ERC1271_MOCK_BYTECODE_FILE: &str = "forge/out/Erc1271Mock.sol/Erc1271Mock.bytecode";
+
 fn extract_bytecodes() {
     extract_bytecode(
         &format_foundry_dir(ERC6492_FILE),
