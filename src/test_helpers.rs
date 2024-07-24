@@ -21,13 +21,20 @@ fn format_foundry_dir(path: &str) -> String {
     )
 }
 
-pub fn spawn_anvil() -> (AnvilInstance, String, ReqwestProvider, SigningKey) {
-    let anvil = Anvil::at(format_foundry_dir("bin/anvil")).spawn();
-    let rpc_url = anvil.endpoint();
-    let provider = ReqwestProvider::<Ethereum>::new_http(anvil.endpoint_url());
-    let private_key = anvil.keys().first().unwrap().clone();
+pub fn spawn_anvil(fork_url: Option<&str>) -> (AnvilInstance, String, ReqwestProvider, SigningKey) {
+    let mut anvil = Anvil::at(format_foundry_dir("bin/anvil"));
+
+    if let Some(fork_url) = fork_url {
+        anvil = anvil.fork(fork_url);
+    }
+
+    let anvil_instance = anvil.spawn();
+
+    let rpc_url = anvil_instance.endpoint();
+    let provider = ReqwestProvider::<Ethereum>::new_http(anvil_instance.endpoint_url());
+    let private_key = anvil_instance.keys().first().unwrap().clone();
     (
-        anvil,
+        anvil_instance,
         rpc_url,
         provider,
         SigningKey::from_bytes(&private_key.to_bytes()).unwrap(),
