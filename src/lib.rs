@@ -1,12 +1,12 @@
 use {
     alloy::{
         primitives::{keccak256, Address, Bytes, FixedBytes, TxKind, B256, U256},
-        providers::Provider,
+        providers::{network::Ethereum, Provider, ReqwestProvider, RootProvider},
         rpc::types::{TransactionInput, TransactionRequest},
         signers::k256::ecdsa::{RecoveryId, Signature, VerifyingKey},
         sol,
         sol_types::{SolCall, SolConstructor},
-        transports::{Transport, TransportErrorKind},
+        transports::{http::{reqwest::Url, Client, Http}, TransportErrorKind},
     },
     log::error,
 };
@@ -142,17 +142,16 @@ fn bytes_to_usize(bytes: &[u8]) -> usize {
 /// # Returns
 ///
 /// The extracted address or an error if the extraction fails.
-pub async fn extract_address<S, P, T>(
+pub async fn extract_address<S>(
     signature: S,
     message: FixedBytes<32>,
-    provider: P,
+    provider: Url
 ) -> Result<Address, SignatureError>
 where
-    S: Into<Bytes>,
-    P: Provider<T>,
-    T: Transport + Clone,
+    S: Into<Bytes>
 {
     let signature: Bytes = signature.into();
+    let provider = ReqwestProvider::<Ethereum>::new_http(provider);
     if signature.len() >= 32 && signature[signature.len() - 32..] == ERC6492_DETECTION_SUFFIX {
         let sig_data = &signature[..signature.len() - 32];
         let (create2_factory, factory_calldata) = parse_erc6492_signature(sig_data)?;
@@ -211,28 +210,28 @@ fn ecrecover_address(message: B256, signature: &[u8]) -> Result<Address, Signatu
 /// # Returns
 ///
 /// A `Verification` enum indicating whether the signature is valid or invalid.
-pub async fn verify_signature_auto<S, P, T>(
+pub async fn verify_signature_auto<S>(
     signature: S,
     message: FixedBytes<32>,
-    provider: P,
+    provider: Url,
 ) -> Result<Verification, RpcError>
 where
-    S: Into<Bytes> + Clone,
-    P: Provider<T>,
-    T: Transport + Clone,
+    S: Into<Bytes> + Clone
 {
-    let address = extract_address(signature.clone(), message, &provider)
+    let root_provider:RootProvider<Http<Client>> = ReqwestProvider::new_http(provider.clone());
+   
+    let address = extract_address(signature.clone(), message, provider.clone())
         .await
         .unwrap();
 
-    let code_at_address = provider
+    let code_at_address = root_provider
         .get_code_at(address)
         .await
         .map_err(SignatureError::ProviderError)
         .unwrap();
 
     if code_at_address.is_empty() {
-        verify_signature(signature, address, message, provider).await
+        verify_signature(signature, address, message, provider.clone()).await
     } else {
         let call = Erc1271Mock::isValidSignatureCall {
             _hash: message,
@@ -247,7 +246,7 @@ where
         let transaction_request =
             TransactionRequest::default().input(TransactionInput::new(bytes.into()));
 
-        let result = provider.call(&transaction_request).await;
+        let result = root_provider.call(&transaction_request).await;
 
         match result {
             Err(e) => {
@@ -335,49 +334,16 @@ sol! {
 ///
 /// A `Verification` enum indicating whether the signature is valid or invalid.
 /// If an error occurs while making the RPC call, it will return `Err(RpcError)`.
-pub async fn verify_signature<S, P, T>(
+pub async fn verify_signature<S>(
     signature: S,
     address: Address,
     message: FixedBytes<32>,
-    provider: P,
+    provider: Url,
 ) -> Result<Verification, RpcError>
 where
-    S: Into<Bytes>,
-    P: Provider<T>,
-    T: Transport + Clone,
+    S: Into<Bytes>
 {
-    let code_exists = provider
-        .get_code_at(address)
-        .await
-        .map_err(SignatureError::ProviderError)
-        .map(|code| !code.is_empty())
-        .unwrap();
-    if code_exists {
-        let call_request = TransactionRequest::default()
-            .to(address)
-            .input(TransactionInput::new(
-                Erc1271Mock::isValidSignatureCall {
-                    _hash: message,
-                    _signature: signature.into(),
-                }
-                .abi_encode()
-                .into(),
-            ));
-
-        let result = provider.call(&call_request).await;
-
-        let result = result.unwrap();
-        let magic = result.get(..4);
-        if let Some(magic) = magic {
-            if magic == MAGIC_VALUE.to_be_bytes().to_vec() {
-                Ok(Verification::Valid)
-            } else {
-                Ok(Verification::Invalid)
-            }
-        } else {
-            Ok(Verification::Invalid)
-        }
-    } else {
+    let provider = ReqwestProvider::<Ethereum>::new_http(provider);
         let call = ValidateSigOffchain::constructorCall {
             _signer: address,
             _hash: message,
@@ -392,6 +358,7 @@ where
             TransactionRequest::default().input(TransactionInput::new(bytes.into()));
 
         let result = provider.call(&transaction_request).await;
+        println!("result inside of verify_signature: {:?}", result);
         match result {
             Err(e) => {
                 if let Some(error_response) = e.as_error_resp() {
@@ -415,43 +382,34 @@ where
                     Ok(Verification::Invalid)
                 }
             }
-        }
     }
 }
 
 #[cfg(test)]
 mod test_helpers;
+mod passkey_smart_wallet_helper;
 
 #[cfg(test)]
 mod test {
     use {
-        super::*,
-        alloy::{
-            dyn_abi::TypedData,
-            primitives::{
-                address, b256, bytes, eip191_hash_message, keccak256, Address, Uint, B256, I256,
-                U256,
-            },
-            providers::{network::Ethereum, Provider, ReqwestProvider},
-            signers::{k256::ecdsa::SigningKey, local::PrivateKeySigner, Signer, SignerSync},
-            sol,
-            sol_types::{eip712_domain, SolCall, SolValue},
-        },
-        serde::Serialize,
-        test_helpers::{
-            deploy_contract, message_str_to_bytes, sign_message_eip191, spawn_anvil,
-            CREATE2_CONTRACT, ERC1271_MOCK_CONTRACT,
-        },
+        super::*, alloy::{
+            dyn_abi::{abi, TypedData}, hex::{self, decode, encode, FromHex}, primitives::{
+                address, b256, bytes, eip191_hash_message, fixed_bytes, keccak256, Address, Keccak256, Uint, B256, I256, U256
+            }, providers::Provider, signers::{k256::ecdsa::SigningKey, local::PrivateKeySigner, Signer, SignerSync}, sol, sol_types::{eip712_domain, SolCall, SolValue}
+        }, serde::Serialize, siwe::{TimeStamp, VerificationOpts}, std::sync::Arc, test_helpers::{
+            deploy_contract, eip191_hash_message_v45, message_str_to_bytes, sign_message_eip191, spawn_anvil, CREATE2_CONTRACT, ERC1271_MOCK_CONTRACT
+        }, time::OffsetDateTime
     };
 
     #[tokio::test]
     async fn test_extract_address_eoa() {
-        let (_anvil, _rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let message = "test message";
         let message_bytes = alloy::primitives::eip191_hash_message(message.as_bytes());
         let signature = sign_message_eip191(message, &private_key);
         let expected_address = Address::from_private_key(&private_key);
-        let extracted_address = extract_address(signature.clone(), message_bytes, provider.clone())
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let extracted_address = extract_address(signature.clone(), message_bytes, url)
             .await
             .unwrap();
         assert_eq!(extracted_address, expected_address);
@@ -459,7 +417,7 @@ mod test {
 
     #[tokio::test]
     async fn test_extract_address_eip721() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, provider, _private_key) = spawn_anvil(None);
         sol! {
             #[derive(Debug, Serialize)]
             struct FooBar {
@@ -498,7 +456,8 @@ mod test {
         let sig_dynamic = signer.sign_hash_sync(&dynamic_hash).unwrap();
         let signature: Bytes = sig_dynamic.as_bytes().to_vec().into();
 
-        let extracted_address = extract_address(signature, dynamic_hash, provider)
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let extracted_address = extract_address(signature, dynamic_hash, url)
             .await
             .unwrap();
 
@@ -507,7 +466,7 @@ mod test {
 
     #[tokio::test]
     async fn test_extract_address_erc1271() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -520,7 +479,8 @@ mod test {
         let signature = sign_message_eip191(message, &private_key);
         // Use the raw bytes of the Address
         let erc1271_signature = [contract_address.as_slice(), signature.as_ref()].concat();
-        let extracted_address = extract_address(erc1271_signature, message_bytes, provider.clone())
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let extracted_address = extract_address(erc1271_signature, message_bytes, url)
             .await
             .unwrap();
         assert_eq!(extracted_address, contract_address);
@@ -528,7 +488,7 @@ mod test {
 
     #[tokio::test]
     async fn test_extract_address_erc6492() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -573,7 +533,8 @@ mod test {
             println!("Test: Factory calldata offset exceeds signature data length");
         }
 
-        let extracted_address = extract_address(erc6492_signature, message_bytes, provider)
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let extracted_address = extract_address(erc6492_signature, message_bytes, url)
             .await
             .unwrap();
 
@@ -581,7 +542,7 @@ mod test {
     }
     #[tokio::test]
     async fn eoa_pass() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, _private_key) = spawn_anvil(None);
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
         let message = "xxx";
@@ -589,9 +550,10 @@ mod test {
         let signature = sign_message_eip191(message, &private_key);
         let signature_bytes = Bytes::from(signature.to_vec());
         let address = Address::from_private_key(&private_key);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
 
         assert!(
-            verify_signature(signature_bytes, address, eip191_message, provider)
+            verify_signature(signature_bytes, address, eip191_message, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -600,7 +562,7 @@ mod test {
 
     #[tokio::test]
     async fn eoa_wrong_signature() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, _private_key) = spawn_anvil(None);
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
         let message = "xxx";
@@ -608,8 +570,9 @@ mod test {
         *signature.first_mut().unwrap() = signature.first().unwrap().wrapping_add(1);
         let address = Address::from_private_key(&private_key);
         let message_bytes = message_str_to_bytes(message);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, address, message_bytes, provider)
+            !verify_signature(signature, address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -618,7 +581,7 @@ mod test {
 
     #[tokio::test]
     async fn typed_data() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, provider, _private_key) = spawn_anvil(None);
 
         sol! {
             #[derive(Debug, Serialize)]
@@ -674,16 +637,82 @@ mod test {
         let signature: Bytes = sig_dynamic.as_bytes().to_vec().into();
 
         let signer_address = signer.address();
-        let is_valid = verify_signature(signature, signer_address, dynamic_hash, provider);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let is_valid = verify_signature(signature, signer_address, dynamic_hash, url);
 
         let is_valid = is_valid.await;
         println!("Is valid: {:?}", is_valid);
         assert!(is_valid.unwrap().is_valid());
     }
+// Function to hash the message and get a 32-byte fixed length array
+fn hash_message(message: &str) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(message);
+    let result = hasher.finalize();
+    let hash: [u8; 32] = result.as_slice().try_into().expect("Wrong length");
+    hash
+}
+
+
+#[tokio::test]
+    async fn smart_wallet_siwe_pass() {
+        use ethers_providers::{Http, Provider};
+        let (_anvil, rpc_url, _provider, _private_key) = spawn_anvil(Some("https://sepolia.base.org"));
+        let sig_hex = "0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000001700000000000000000000000000000000000000000000000000000000000000016d3eec5e1c306c2079118e234df0d552a8b975d573011b95aed129958d17210270a8747f4872f301ca9ee63d3e69697477a894e699e637f2720e62205792f3420000000000000000000000000000000000000000000000000000000000000025f198086b2db17256731bc456673b96bcef23f51d1fbacdd7c4379ef65465572f1d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008a7b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a224b726b727939445762355f666b564f734c614d4b4130764e716f6f42507667564f4f7a4f2d33414f467249222c226f726967696e223a2268747470733a2f2f6b6579732e636f696e626173652e636f6d222c2263726f73734f726967696e223a66616c73657d00000000000000000000000000000000000000000000";
+        let sig_bytes = hex::decode(sig_hex).unwrap();
+        let message_str = "example.com wants you to sign in with your Ethereum account:\n0x58cCc347f993B92B7c2501fA0d3585E026A12A38\n\nSign in with ethereum to the app\n\nURI: https://example.com/\nVersion: 1\nChain ID: 84532\nNonce: kEWepMt9knR6lWJ6A\nIssued At: 2024-07-26T08:22:22Z";
+        let final_message_str = eip191_hash_message(message_str.as_bytes());
+        println!("Final message: {:?}", final_message_str);
+let offset_datetime_in_past = OffsetDateTime::from_unix_timestamp(1721982142).unwrap();
+let issued_at:TimeStamp = TimeStamp::from(OffsetDateTime::from(offset_datetime_in_past));
+let nonce:String = "kEWepMt9knR6lWJ6A".to_string();
+let global_timestamp = OffsetDateTime::now_utc();
+let address:[u8;20] = address!("58cCc347f993B92B7c2501fA0d3585E026A12A38").into();
+let message = siwe::Message {
+    domain: "example.com".parse().unwrap(),
+    address: address.clone(),
+    statement: Some("Sign in with ethereum to the app".to_string()),
+    uri: "https://example.com/".parse().unwrap(),
+    version: siwe::Version::V1,
+    chain_id: 84532,
+    nonce: "kEWepMt9knR6lWJ6A".to_string(),
+    issued_at: issued_at,
+    expiration_time: None,
+    not_before: None,
+    request_id: None,
+    resources: vec![]
+};
+
+println!("Message: {:?}", message.to_string());
+
+let url:Http = "https://sepolia.base.org".parse().unwrap();
+let rpc_provider = ethers_providers::Provider::<Http>::new(url);
+// let final_sig = Bytes::from(byte_vec);
+
+// let test_p = Provider::<T>::try_from("https://sepolia.base.org").unwrap();
+let ops =  VerificationOpts {
+    domain: Some("example.com".parse().unwrap()),
+    nonce: Some("kEWepMt9knR6lWJ6A".to_string()),
+    timestamp: Some(global_timestamp.clone()),
+    rpc_provider: Some(rpc_provider.clone()),
+};
+let final_msg_vec_8 = eip191_hash_message(message.to_string().as_bytes());
+
+            let result = verify_signature(sig_bytes, address.into(), final_message_str, Url::parse(rpc_url.as_str()).unwrap())
+                .await
+                .unwrap()
+                .is_valid();
+
+            println!("Result: {:?}", result);
+        
+
+
+
+    }
 
     #[tokio::test]
     async fn eoa_wrong_address() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, _private_key) = spawn_anvil(None);
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
         let message = "xxx";
@@ -691,8 +720,9 @@ mod test {
         let mut address = Address::from_private_key(&private_key);
         *address.0.first_mut().unwrap() = address.0.first().unwrap().wrapping_add(1);
         let message_bytes = message_str_to_bytes(message);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, address, message_bytes, provider)
+            !verify_signature(signature, address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -701,7 +731,7 @@ mod test {
 
     #[tokio::test]
     async fn eoa_wrong_message() {
-        let (_anvil, _rpc_url, provider, _private_key) = spawn_anvil(None);
+        let (_anvil,rpc_url, _provider, _private_key) = spawn_anvil(None);
 
         let private_key = SigningKey::random(&mut rand::thread_rng());
         let message = "xxx";
@@ -709,8 +739,9 @@ mod test {
         let address = Address::from_private_key(&private_key);
         let message2 = "yyy";
         let message2_bytes = message_str_to_bytes(message2);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, address, message2_bytes, provider)
+            !verify_signature(signature, address, message2_bytes, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -719,7 +750,7 @@ mod test {
 
     #[tokio::test]
     async fn erc1271_pass() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -732,9 +763,9 @@ mod test {
         let eip191_message = alloy::primitives::eip191_hash_message(message);
         let signature = sign_message_eip191(message, &private_key);
         let signature_bytes = Bytes::from(signature.to_vec());
-
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            verify_signature(signature_bytes, contract_address, eip191_message, provider)
+            verify_signature(signature_bytes, contract_address, eip191_message, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -743,7 +774,7 @@ mod test {
 
     #[tokio::test]
     async fn erc1271_wrong_signature() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -757,9 +788,9 @@ mod test {
         let mut signature = sign_message_eip191(message, &private_key);
         let signature_bytes = Bytes::from(signature.to_vec());
         *signature.first_mut().unwrap() = signature.first().unwrap().wrapping_add(1);
-
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature_bytes, contract_address, message_bytes, provider)
+            !verify_signature(signature_bytes, contract_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -768,7 +799,7 @@ mod test {
 
     #[tokio::test]
     async fn erc1271_wrong_signer() {
-        let (anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -783,9 +814,10 @@ mod test {
             message,
             &SigningKey::from_bytes(&anvil.keys().get(1).unwrap().to_bytes()).unwrap(),
         );
+        let url = Url::parse(rpc_url.as_str()).unwrap();
 
         assert!(
-            !verify_signature(signature, contract_address, message_bytes, provider)
+            !verify_signature(signature, contract_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -794,7 +826,7 @@ mod test {
 
     #[tokio::test]
     async fn erc1271_wrong_contract_address() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let mut contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -809,9 +841,9 @@ mod test {
         let message = "xxx";
         let message_bytes = message_str_to_bytes(message);
         let signature = sign_message_eip191(message, &private_key);
-
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, contract_address, message_bytes, provider)
+            !verify_signature(signature, contract_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid()
@@ -820,7 +852,7 @@ mod test {
 
     #[tokio::test]
     async fn erc1271_wrong_message() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let contract_address = deploy_contract(
             &rpc_url,
             &private_key,
@@ -834,8 +866,9 @@ mod test {
 
         let message2 = "yyy";
         let message2_bytes = message_str_to_bytes(message2);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, contract_address, message2_bytes, provider)
+            !verify_signature(signature, contract_address, message2_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -906,7 +939,7 @@ mod test {
 
     #[tokio::test]
     async fn erc6492_pass() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
@@ -920,15 +953,17 @@ mod test {
 
         let message_bytes = alloy::primitives::eip191_hash_message(message);
 
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+
         let result =
-            verify_signature(signature_bytes, predeploy_address, message_bytes, provider).await;
+            verify_signature(signature_bytes, predeploy_address, message_bytes, url).await;
 
         assert!(result.unwrap().is_valid());
     }
 
     #[tokio::test]
     async fn erc6492_wrong_signature() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
@@ -941,9 +976,10 @@ mod test {
             create2_factory_address,
             signature,
         );
+        let url = Url::parse(rpc_url.as_str()).unwrap();
 
         assert!(
-            !verify_signature(signature, predeploy_address, message_bytes, provider)
+            !verify_signature(signature, predeploy_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -952,7 +988,7 @@ mod test {
 
     #[tokio::test]
     async fn erc6492_wrong_signer() {
-        let (anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
@@ -967,9 +1003,10 @@ mod test {
             create2_factory_address,
             signature,
         );
+        let url = Url::parse(rpc_url.as_str()).unwrap();
 
         assert!(
-            !verify_signature(signature, predeploy_address, message_bytes, provider)
+            !verify_signature(signature, predeploy_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -978,7 +1015,7 @@ mod test {
 
     #[tokio::test]
     async fn erc6492_wrong_contract_address() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
@@ -994,8 +1031,10 @@ mod test {
         *predeploy_address.0.first_mut().unwrap() =
             predeploy_address.0.first().unwrap().wrapping_add(1);
 
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+
         assert!(
-            !verify_signature(signature, predeploy_address, message_bytes, provider)
+            !verify_signature(signature, predeploy_address, message_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -1004,7 +1043,7 @@ mod test {
 
     #[tokio::test]
     async fn erc6492_wrong_message() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
 
@@ -1018,8 +1057,9 @@ mod test {
 
         let message2 = "yyy";
         let message2_bytes = message_str_to_bytes(message2);
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         assert!(
-            !verify_signature(signature, predeploy_address, message2_bytes, provider)
+            !verify_signature(signature, predeploy_address, message2_bytes, url)
                 .await
                 .unwrap()
                 .is_valid(),
@@ -1028,7 +1068,7 @@ mod test {
 
     #[tokio::test]
     async fn test_erc6492_signature_with_invalid_factory() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1046,14 +1086,15 @@ mod test {
         erc6492_signature[12..32].copy_from_slice(invalid_factory.as_slice());
 
         println!("Signature: {:?}", erc6492_signature);
-        let result = extract_address(erc6492_signature, message_bytes, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = extract_address(erc6492_signature, message_bytes, url).await;
         println!("Result: {:?}", result);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_erc6492_signature_with_empty_factory_calldata() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1070,13 +1111,14 @@ mod test {
         let factory_calldata_offset = bytes_to_usize(&erc6492_signature[32..64]);
         erc6492_signature[factory_calldata_offset..factory_calldata_offset + 32].fill(0);
 
-        let result = extract_address(erc6492_signature, message_bytes, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = extract_address(erc6492_signature, message_bytes, url).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_erc6492_signature_with_mismatched_lengths() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1095,13 +1137,14 @@ mod test {
         erc6492_signature[factory_calldata_offset..factory_calldata_offset + 32]
             .copy_from_slice(&incorrect_length);
 
-        let result = extract_address(erc6492_signature, message_bytes, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = extract_address(erc6492_signature, message_bytes, url).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_erc6492_signature_with_invalid_magic_bytes() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1121,7 +1164,8 @@ mod test {
         // Create an immutable reference for extract_address
         let modified_signature = erc6492_signature;
 
-        let result = extract_address(modified_signature, message_bytes, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = extract_address(modified_signature, message_bytes, url).await;
         assert!(matches!(result, Ok(addr) if addr != predeploy_address));
     }
 
@@ -1129,7 +1173,11 @@ mod test {
     #[cfg(any(test, feature = "reqwest"))]
     async fn erc6492_deployed_smart_wallet() {
         // contract deployed at 0x3e5608baE5e195F7EB12792f0Ba1aEf911F364E9 on base sepolia
-        let (_anvil, _rpc_url, provider, _private_key) =
+
+        use siwe::Version;
+        use time::OffsetDateTime;
+        use siwe::TimeStamp;
+        let (_anvil, rpc_url, _provider, _private_key) =
             spawn_anvil(Some("https://sepolia.base.org"));
 
         let message = "Example Message";
@@ -1139,15 +1187,16 @@ mod test {
         // Bytes::from(signature.to_vec());
         let signer = address!("3e5608baE5e195F7EB12792f0Ba1aEf911F364E9");
 
-        let result = verify_signature(signature, signer, hash_message, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = verify_signature(signature, signer, hash_message, url).await;
 
-        println!("{:?}", result);
+        println!("result {:?}", result);
         assert!(result.unwrap().is_valid());
     }
 
     #[tokio::test]
     async fn test_erc6492_signature_with_large_factory_calldata() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1168,14 +1217,15 @@ mod test {
         new_signature.extend_from_slice(&large_calldata);
         new_signature.extend_from_slice(&erc6492_signature[factory_calldata_offset + 32..]);
 
-        let result = extract_address(new_signature, message_bytes, provider).await;
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let result = extract_address(new_signature, message_bytes, url).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_erc6492_signature_with_deployed_contract() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
         let message = "test message";
@@ -1190,19 +1240,21 @@ mod test {
             signature.clone(),
         );
 
-        let _ = extract_address(erc6492_signature.clone(), message_bytes, provider.clone())
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        let _ = extract_address(erc6492_signature.clone(), message_bytes, url.clone())
             .await
             .unwrap();
 
+            let url = Url::parse(rpc_url.as_str()).unwrap();
         // Now try to extract the address again
-        let result = extract_address(erc6492_signature, message_bytes, provider).await;
+        let result = extract_address(erc6492_signature, message_bytes, url).await;
         assert_eq!(result.unwrap(), address);
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_erc6492_signature_with_different_message() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, private_key) = spawn_anvil(None);
 
         let create2_factory_address =
             deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
@@ -1218,11 +1270,12 @@ mod test {
         let (predeploy_address, erc6492_signature) =
             predeploy_signature(signer_address, create2_factory_address, signature.to_vec());
 
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         // First, extract address with the correct message
         let result1 = extract_address(
             erc6492_signature.clone().to_vec(),
             original_message_bytes,
-            provider.clone(),
+            url
         )
         .await;
 
@@ -1244,10 +1297,11 @@ mod test {
         let different_message = "different message";
         let different_message_bytes = message_str_to_bytes(different_message);
 
+        let url = Url::parse(rpc_url.as_str()).unwrap();
         let result2 = extract_address(
             erc6492_signature.clone(),
             different_message_bytes,
-            provider.clone(),
+            url
         )
         .await;
         match &result2 {
@@ -1266,12 +1320,14 @@ mod test {
             "Extracted address should match predeploy address even with different message"
         );
 
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+
         // Now verify the signature with both messages
         let verification1 = verify_signature(
             erc6492_signature.clone(),
             predeploy_address,
             original_message_bytes,
-            provider.clone(),
+            url.clone()
         )
         .await;
         assert!(
@@ -1283,7 +1339,7 @@ mod test {
             erc6492_signature,
             predeploy_address,
             different_message_bytes,
-            provider,
+            url.clone()
         )
         .await;
         assert!(
@@ -1299,19 +1355,15 @@ mod test {
     #[tokio::test]
     #[ignore]
     async fn manual() {
-        let (_anvil, _rpc_url, _provider, _private_key) = spawn_anvil(None);
+        let (_anvil, rpc_url, _provider, _private_key) = spawn_anvil(None);
 
         let address = address!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
         let message = "xxx";
         let message_hash = eip191_hash_message(message.as_bytes());
         let signature = bytes!("aaaa");
 
-        let provider = ReqwestProvider::<Ethereum>::new_http(
-            "https://rpc.walletconnect.com/v1?chainId=eip155:1&projectId=xxx"
-                .parse()
-                .unwrap(),
-        );
-        assert!(verify_signature(signature, address, message_hash, provider)
+        let url = Url::parse(rpc_url.as_str()).unwrap();
+        assert!(verify_signature(signature, address, message_hash, url)
             .await
             .unwrap()
             .is_valid());

@@ -1,6 +1,6 @@
 use {
     alloy::{
-        primitives::{eip191_hash_message, hex, Address, FixedBytes},
+        primitives::{eip191_hash_message, hex, Address, FixedBytes, Keccak256},
         providers::{network::Ethereum, ReqwestProvider},
         signers::k256::{
             ecdsa::{Signature, SigningKey},
@@ -111,3 +111,38 @@ pub fn message_str_to_bytes(input: &str) -> FixedBytes<32> {
     fixed_bytes.copy_from_slice(&result[..]);
     FixedBytes::from(fixed_bytes)
 }
+
+const EIP191_PREFIX: &str = "\x19Ethereum Signed Message:\n";
+
+/// Hash a message according to EIP-191 (version `0x45`).
+/// The final message is a UTF-8 string, encoded as follows:
+/// `"\x19Ethereum Signed Message:\n" + message.length + message`
+/// This message is then hashed using Keccak-256.
+pub fn eip191_hash_message_v45<T: AsRef<[u8]>>(message: T) -> FixedBytes<32>{
+    keccak256(eip191_message_v45(message))
+}
+
+/// Constructs a message according to EIP-191 (version `0x45`).
+/// The final message is a UTF-8 string, encoded as follows:
+/// `"\x19Ethereum Signed Message:\n" + message.length + message`
+pub fn eip191_message_v45<T: AsRef<[u8]>>(message: T) -> Vec<u8> {
+    let message = message.as_ref();
+    let len_string = message.len().to_string();
+    println!("len_string: {:?}", len_string);
+    let mut eth_message = Vec::with_capacity(EIP191_PREFIX.len() + len_string.len() + message.len());
+    eth_message.extend_from_slice(EIP191_PREFIX.as_bytes());
+    eth_message.extend_from_slice(len_string.as_bytes());
+    eth_message.extend_from_slice(message);
+    eth_message
+}
+
+/// Computes the Keccak-256 hash of the input bytes.
+pub fn keccak256(input: Vec<u8>) -> FixedBytes<32> {
+    let mut hasher = Keccak256::new();
+    hasher.update(input);
+    let result = hasher.finalize();
+    let mut hash:FixedBytes<32> = Default::default();
+    hash.copy_from_slice(&result.as_slice());
+    hash
+}
+
