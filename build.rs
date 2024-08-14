@@ -102,6 +102,6 @@ fn extract_bytecode(input_file: &str, output_file: &str) {
         .unwrap()
         .strip_prefix("0x")
         .unwrap();
-    let bytecode = alloy::hex::decode(bytecode).unwrap();
+    let bytecode = alloy_primitives::hex::decode(bytecode).unwrap();
     std::fs::write(output_file, bytecode).unwrap();
 }
