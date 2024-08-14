@@ -429,10 +429,9 @@ mod test {
         alloy::{
             dyn_abi::TypedData,
             primitives::{
-                address, b256, bytes, eip191_hash_message, keccak256, Address, Uint, B256, I256,
-                U256,
+                address, b256, eip191_hash_message, keccak256, Address, Uint, B256, I256, U256,
             },
-            providers::{network::Ethereum, Provider, ReqwestProvider},
+            providers::Provider,
             signers::{k256::ecdsa::SigningKey, local::PrivateKeySigner, Signer, SignerSync},
             sol,
             sol_types::{eip712_domain, SolCall, SolValue},
@@ -1126,7 +1125,6 @@ mod test {
     }
 
     #[tokio::test]
-    #[cfg(any(test, feature = "reqwest"))]
     async fn erc6492_deployed_smart_wallet() {
         // contract deployed at 0x3e5608baE5e195F7EB12792f0Ba1aEf911F364E9 on base sepolia
         let (_anvil, _rpc_url, provider, _private_key) =
@@ -1136,12 +1134,55 @@ mod test {
         let hash_message: FixedBytes<32> = eip191_hash_message(message.as_bytes());
         let signature:Bytes = alloy::hex::decode("0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c000000000000000000000000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000017000000000000000000000000000000000000000000000000000000000000000111d8c5e6edcd92aeac9ee215372ebf3264300a429ae6dd79f93d71781d1a397d747b83a603182db717314be83bf9ae0d18d0652294a09d8d472a0cdd6f4a11c80000000000000000000000000000000000000000000000000000000000000025f9351d6932d2b1c9aca4fee013c4ff2672f712f28e9c37330bac4fa19292b8351d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008f7b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a2274337659526847564b6258504a476c506e51676d79495950573079442d356b497675536e497a494d485a4d222c226f726967696e223a2268747470733a2f2f6b6579732d626574612e636f696e626173652e636f6d222c2263726f73734f726967696e223a66616c73657d0000000000000000000000000000000000").unwrap().into();
 
-        // Bytes::from(signature.to_vec());
         let signer = address!("3e5608baE5e195F7EB12792f0Ba1aEf911F364E9");
 
         let result = verify_signature(signature, signer, hash_message, provider).await;
 
-        println!("{:?}", result);
+        assert!(result.unwrap().is_valid());
+    }
+
+    #[tokio::test]
+    async fn erc6492_deployed_smart_wallet_part_2() {
+        // contract deployed at 0xB323dC84085eC25FF635CcA7c48B7484d9A78C7E on base sepolia
+        let (_anvil, _rpc_url, provider, _private_key) =
+            spawn_anvil(Some("https://sepolia.base.org"));
+
+        let message = "Example Message";
+        let hash_message: FixedBytes<32> = eip191_hash_message(message.as_bytes());
+        let signature:Bytes = alloy::hex::decode("0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000120000000000000000000000000000000000000000000000000000000000000001700000000000000000000000000000000000000000000000000000000000000017b0c1a57683563b5b2654975143abf3f914ce38a4a117b58c5644b0f48fce8151fe23e117da99b9fc44308cd5fdad1153dd14f8b3775c1d6b81511b7934868040000000000000000000000000000000000000000000000000000000000000025f198086b2db17256731bc456673b96bcef23f51d1fbacdd7c4379ef65465572f1d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008a7b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a2236743932614f45646a2d347444412d5f46554836536d623148316b4777434c774865635a4e2d4e71364638222c226f726967696e223a2268747470733a2f2f6b6579732e636f696e626173652e636f6d222c2263726f73734f726967696e223a66616c73657d00000000000000000000000000000000000000000000").unwrap().into();
+
+        let signer = address!("B323dC84085eC25FF635CcA7c48B7484d9A78C7E");
+
+        let result = verify_signature(signature, signer, hash_message, provider).await;
+
+        assert!(result.unwrap().is_valid());
+    }
+
+    #[tokio::test]
+    async fn erc6492_deployed_smart_wallet_with_siwe() {
+        // contract deployed at 0xB323dC84085eC25FF635CcA7c48B7484d9A78C7E on base sepolia
+        let (_anvil, _rpc_url, provider, _private_key) =
+            spawn_anvil(Some("https://sepolia.base.org"));
+
+        let message = r#"royal.market wants you to sign in with your Ethereum account:
+0xB323dC84085eC25FF635CcA7c48B7484d9A78C7E
+
+Sign in to Royal. By signing in you agree to our terms of use.
+
+URI: https://royal.market
+Version: 1
+Chain ID: 84532
+Nonce: oPl5AulKaU2
+Issued At: 2024-08-14T00:58:29.232Z
+Resources:
+- https://royal.io/legal/tos"#;
+        let hash_message: FixedBytes<32> = eip191_hash_message(message.as_bytes());
+        let signature:Bytes = alloy::hex::decode("0x0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000170000000000000000000000000000000000000000000000000000000000000001ae6abc8a4fb2581660a282be473092b7c5eb89bc6685cd6ff0c5e651a509a0f4680b9172a15befa76ce1786e6ec5f55b978c2e30fa8df43dcb144a198f5eb9640000000000000000000000000000000000000000000000000000000000000025f198086b2db17256731bc456673b96bcef23f51d1fbacdd7c4379ef65465572f1d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008a7b2274797065223a22776562617574686e2e676574222c226368616c6c656e6765223a226c395a566b307a79344a776d5a4f724d4e6c6831684c756a6c774e6864516d764f793857467a4f785a5651222c226f726967696e223a2268747470733a2f2f6b6579732e636f696e626173652e636f6d222c2263726f73734f726967696e223a66616c73657d00000000000000000000000000000000000000000000").unwrap().into();
+
+        let signer = address!("B323dC84085eC25FF635CcA7c48B7484d9A78C7E");
+
+        let result = verify_signature(signature, signer, hash_message, provider).await;
+
         assert!(result.unwrap().is_valid());
     }
 
@@ -1170,150 +1211,5 @@ mod test {
 
         let result = extract_address(new_signature, message_bytes, provider).await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_erc6492_signature_with_deployed_contract() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
-        let create2_factory_address =
-            deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-        let message = "test message";
-        let message_bytes = alloy::primitives::eip191_hash_message(message.as_bytes());
-        let signature = sign_message_eip191(message, &private_key);
-        let address = Address::from_private_key(&private_key);
-
-        // First, deploy the contract
-        let (_predeploy_address, erc6492_signature) = predeploy_signature(
-            Address::from_private_key(&private_key),
-            create2_factory_address,
-            signature.clone(),
-        );
-
-        let _ = extract_address(erc6492_signature.clone(), message_bytes, provider.clone())
-            .await
-            .unwrap();
-
-        // Now try to extract the address again
-        let result = extract_address(erc6492_signature, message_bytes, provider).await;
-        assert_eq!(result.unwrap(), address);
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_erc6492_signature_with_different_message() {
-        let (_anvil, rpc_url, provider, private_key) = spawn_anvil(None);
-
-        let create2_factory_address =
-            deploy_contract(&rpc_url, &private_key, CREATE2_CONTRACT, None).await;
-
-        let original_message = "test message";
-        let original_message_bytes =
-            alloy::primitives::eip191_hash_message(original_message.as_bytes());
-
-        let signature = sign_message_eip191(original_message, &private_key);
-
-        let signer_address = Address::from_private_key(&private_key);
-
-        let (predeploy_address, erc6492_signature) =
-            predeploy_signature(signer_address, create2_factory_address, signature.to_vec());
-
-        // First, extract address with the correct message
-        let result1 = extract_address(
-            erc6492_signature.clone().to_vec(),
-            original_message_bytes,
-            provider.clone(),
-        )
-        .await;
-
-        match &result1 {
-            Ok(addr) => println!("Extracted address with original message: {:?}", addr),
-            Err(e) => println!("Error extracting address with original message: {:?}", e),
-        }
-        assert!(
-            result1.is_ok(),
-            "Failed to extract address with original message"
-        );
-        assert_eq!(
-            result1.unwrap(),
-            signer_address,
-            "Extracted address doesn't match predeploy address"
-        );
-
-        // Now try with a different message
-        let different_message = "different message";
-        let different_message_bytes = message_str_to_bytes(different_message);
-
-        let result2 = extract_address(
-            erc6492_signature.clone(),
-            different_message_bytes,
-            provider.clone(),
-        )
-        .await;
-        match &result2 {
-            Ok(addr) => println!("Extracted address with different message: {:?}", addr),
-            Err(e) => println!("Error extracting address with different message: {:?}", e),
-        }
-
-        // The extracted address should be the same for both messages
-        assert!(
-            result2.is_ok(),
-            "Failed to extract address with different message"
-        );
-        assert_eq!(
-            result2.unwrap(),
-            predeploy_address,
-            "Extracted address should match predeploy address even with different message"
-        );
-
-        // Now verify the signature with both messages
-        let verification1 = verify_signature(
-            erc6492_signature.clone(),
-            predeploy_address,
-            original_message_bytes,
-            provider.clone(),
-        )
-        .await;
-        assert!(
-            verification1.unwrap().is_valid(),
-            "Signature should be valid for the original message"
-        );
-
-        let verification2 = verify_signature(
-            erc6492_signature,
-            predeploy_address,
-            different_message_bytes,
-            provider,
-        )
-        .await;
-        assert!(
-            !verification2.unwrap().is_valid(),
-            "Signature should be invalid for the different message"
-        );
-
-        println!("Test completed successfully");
-    }
-
-    // Manual test. Paste address, signature, message, and project ID to verify
-    // function
-    #[tokio::test]
-    #[ignore]
-    async fn manual() {
-        let (_anvil, _rpc_url, _provider, _private_key) = spawn_anvil(None);
-
-        let address = address!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-        let message = "xxx";
-        let message_hash = eip191_hash_message(message.as_bytes());
-        let signature = bytes!("aaaa");
-
-        let provider = ReqwestProvider::<Ethereum>::new_http(
-            "https://rpc.walletconnect.com/v1?chainId=eip155:1&projectId=xxx"
-                .parse()
-                .unwrap(),
-        );
-        assert!(verify_signature(signature, address, message_hash, provider)
-            .await
-            .unwrap()
-            .is_valid());
     }
 }
