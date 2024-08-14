@@ -7,11 +7,12 @@ authors = ["Royal Engineering"]
 license = "MIT"
 
 [dependencies]
-alloy = { version = "0.2", features = [
+alloy = { version = "0.2", default-features = false, features = [
 	"contract",
 	"dyn-abi",
 	"eip712",
 	"k256",
+	"reqwest-rustls-tls",
 	"providers",
 	"rpc",
 	"json-rpc",
